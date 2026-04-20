@@ -245,19 +245,17 @@ class FullyAsyncRollouter(SeparateRayPPOTrainer):
             # every time param change, reset staleness_samples
             self.staleness_samples = len(self.active_tasks) + await self.message_queue_client.get_queue_size()
             timing_raw = {}
+            rollout_version_time = max(time.time() - self.step_start_time, 1e-6)
             if self.idle_start_time > self.step_start_time:
                 rollout_active_time = self.idle_start_time - self.step_start_time
-                rollout_version_time = time.time() - self.step_start_time
                 idle_ratio = 1 - rollout_active_time / rollout_version_time
-                timing_raw["fully_async/rollouter/active_time"] = rollout_active_time
-                timing_raw["fully_async/rollouter/version_time"] = rollout_version_time
-                timing_raw["fully_async/rollouter/idle_ratio"] = idle_ratio
             else:
-                rollout_version_time = time.time() - self.step_start_time
-                timing_raw["fully_async/rollouter/active_time"] = rollout_version_time
-                timing_raw["fully_async/rollouter/version_time"] = rollout_version_time
-                timing_raw["fully_async/rollouter/idle_ratio"] = 0
-
+                rollout_active_time = rollout_version_time
+                idle_ratio = 0
+            timing_raw["fully_async/rollouter/active_time"] = rollout_active_time
+            timing_raw["fully_async/rollouter/version_time"] = rollout_version_time
+            timing_raw["fully_async/rollouter/idle_ratio"] = idle_ratio
+                
             print(
                 f"[FullyAsyncRollouter][Public][reset_staleness] "
                 f"reset staleness_samples to: {self.staleness_samples} "
