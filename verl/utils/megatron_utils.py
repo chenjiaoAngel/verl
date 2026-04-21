@@ -1596,7 +1596,20 @@ def restore_megatron_model_from_cpu(models, cpu_state):
                 for buffer, buffer_state in zip(buffers, buffer_list, strict=False):
                     # Restore parameter data
                     if "param_data" in buffer_state:
-                        buffer.param_data.data.copy_(buffer_state["param_data"].to(buffer.param_data.device))
+                        cpu_tensor = buffer_state["param_data"]
+                        target_param = buffer.param_data
+                        
+                        # Check if offloaded (storage size is 0)
+                        if target_param.storage().size() == 0:
+                            # Use CPU shadow parameter or reallocate GPU memory
+                            if hasattr(target_param, 'cpu_data') and target_param.cpu_data is not None:
+                                target_param.cpu_data.copy_(cpu_tensor.to(target_param.cpu_data.device))
+                            else:
+                                target_param.data = torch.empty_like(cpu_tensor, device=target_param.device)
+                                target_param.data.copy_(cpu_tensor.to(target_param.device))
+                        else:
+                            # Normal GPU copy
+                            target_param.data.copy_(cpu_tensor.to(target_param.device))
 
         elif not chunk_state["is_ddp"] and not isinstance(model_chunk, DDP):
             # Restore non-DDP models
