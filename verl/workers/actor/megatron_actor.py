@@ -666,7 +666,7 @@ class MegatronPPOActor(BasePPOActor):
                         #     "`actor_rollout_ref.model.use_fused_kernels=True`. "
                         #     "The current `clone()` operation ensures correctness but increases memory usage."
                         # )
-                        entropy = vocab_parallel_entropy(logits)
+                        entropy = vocab_parallel_entropy(logits, self.config.entropy_from_logits_with_chunking)
                         ret["entropy"] = entropy
                     else:
                         logits_bak = logits

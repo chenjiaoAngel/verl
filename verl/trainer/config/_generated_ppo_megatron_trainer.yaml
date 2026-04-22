@@ -38,6 +38,7 @@ actor_rollout_ref:
       virtual_pipeline_model_parallel_size: null
       context_parallel_size: 1
       sequence_parallel: true
+      entropy_from_logits_with_chunking: false
       use_distributed_optimizer: true
       use_dist_checkpointing: false
       dist_checkpointing_path: null
@@ -224,6 +225,7 @@ actor_rollout_ref:
       virtual_pipeline_model_parallel_size: ${oc.select:actor_rollout_ref.actor.megatron.virtual_pipeline_model_parallel_size,null}
       context_parallel_size: ${oc.select:actor_rollout_ref.actor.megatron.context_parallel_size,1}
       sequence_parallel: true
+      entropy_from_logits_with_chunking: ${oc.select:actor_rollout_ref.actor.megatron.entropy_from_logits_with_chunking,False}
       use_distributed_optimizer: true
       use_dist_checkpointing: false
       dist_checkpointing_path: null
@@ -522,6 +524,7 @@ critic:
     virtual_pipeline_model_parallel_size: null
     context_parallel_size: 1
     sequence_parallel: true
+    entropy_from_logits_with_chunking: false
     use_distributed_optimizer: true
     use_dist_checkpointing: false
     dist_checkpointing_path: null

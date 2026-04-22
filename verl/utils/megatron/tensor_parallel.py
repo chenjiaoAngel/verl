@@ -16,7 +16,7 @@
 Utilities for using tensor_parallel in megatron
 """
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Optional
 
 import torch
 import torch.distributed as dist
@@ -139,15 +139,150 @@ class _VocabParallelEntropy(torch.autograd.Function):
         return softmax_logits
 
 
-def vocab_parallel_entropy(vocab_parallel_logits: torch.Tensor) -> torch.Tensor:
-    """Compute entropy when the logits are sharded in tp ranks
+class _VocabParallelEntropyChunked(torch.autograd.Function):
+    """Memory-efficient chunked version of VocabParallelEntropy.
+
+    This implementation splits the computation into chunks to reduce peak memory usage,
+    which is especially useful when dealing with large batch sizes or long sequences.
+    """
+
+    @staticmethod
+    def forward(ctx, vocab_parallel_logits: torch.Tensor, chunk_size: int = 2048) -> torch.Tensor:
+        """Compute entropy in chunks to reduce memory usage.
+
+        Args:
+            vocab_parallel_logits: (total_nnz, vocab_size // tp_size)
+            chunk_size: Number of samples to process in each chunk
+
+        Returns:
+            entropy: (total_nnz,)
+        """
+        total_nnz, local_vocab_size = vocab_parallel_logits.shape
+        tp_group = mpu.get_tensor_model_parallel_group()
+
+        # Step 1: Compute max in chunks
+        logits_max_chunks = []
+        for i in range(0, total_nnz, chunk_size):
+            chunk = vocab_parallel_logits[i : i + chunk_size]
+            chunk_max = chunk.max(dim=-1, keepdim=True).values
+            logits_max_chunks.append(chunk_max)
+
+        logits_max = torch.cat(logits_max_chunks, dim=0)
+        dist.all_reduce(logits_max, op=dist.ReduceOp.MAX, group=tp_group)
+        del logits_max_chunks  # Free memory
+
+        # Step 2: Compute exp and sum in chunks
+        normalized_exp_logits_list = []
+        normalized_sum_exp_list = []
+
+        for i in range(0, total_nnz, chunk_size):
+            chunk = vocab_parallel_logits[i : i + chunk_size]
+            chunk_max = logits_max[i : i + chunk_size]
+
+            # Normalize and exp
+            normalized_chunk = chunk - chunk_max
+            exp_chunk = normalized_chunk.exp_()
+            del normalized_chunk  # Free immediately
+
+            # Sum for this chunk
+            sum_exp = exp_chunk.sum(dim=-1, keepdim=True)
+
+            normalized_exp_logits_list.append(exp_chunk)
+            normalized_sum_exp_list.append(sum_exp)
+
+        # Concatenate and all_reduce
+        normalized_exp_logits = torch.cat(normalized_exp_logits_list, dim=0)
+        normalized_sum_exp_logits = torch.cat(normalized_sum_exp_list, dim=0)
+        del normalized_exp_logits_list, normalized_sum_exp_list  # Free memory
+
+        dist.all_reduce(normalized_sum_exp_logits, group=tp_group)
+
+        # Step 3: Compute softmax in chunks
+        softmax_logits_list = []
+        sum_softmax_times_logits_list = []
+
+        for i in range(0, total_nnz, chunk_size):
+            exp_chunk = normalized_exp_logits[i : i + chunk_size]
+            sum_exp_chunk = normalized_sum_exp_logits[i : i + chunk_size]
+            logits_chunk = vocab_parallel_logits[i : i + chunk_size]
+
+            # Softmax
+            softmax_chunk = exp_chunk.div_(sum_exp_chunk)
+
+            # Compute sum(softmax * logits) for this chunk
+            sum_softmax_logits_chunk = (softmax_chunk * logits_chunk).sum(dim=-1, keepdim=True)
+
+            softmax_logits_list.append(softmax_chunk)
+            sum_softmax_times_logits_list.append(sum_softmax_logits_chunk)
+
+        softmax_logits = torch.cat(softmax_logits_list, dim=0)
+        sum_softmax_times_logits = torch.cat(sum_softmax_times_logits_list, dim=0)
+        del softmax_logits_list, sum_softmax_times_logits_list  # Free memory
+
+        dist.all_reduce(sum_softmax_times_logits, group=tp_group)
+
+        # Step 4: Compute final entropy in chunks
+        entropy_chunks = []
+        for i in range(0, total_nnz, chunk_size):
+            max_chunk = logits_max[i : i + chunk_size]
+            sum_exp_chunk = normalized_sum_exp_logits[i : i + chunk_size]
+            sum_softmax_logits_chunk = sum_softmax_times_logits[i : i + chunk_size]
+
+            entropy_chunk = max_chunk + sum_exp_chunk.log() - sum_softmax_logits_chunk
+            entropy_chunks.append(entropy_chunk)
+
+        entropy = torch.cat(entropy_chunks, dim=0).squeeze(dim=-1)
+
+        # Save for backward
+        ctx.save_for_backward(vocab_parallel_logits, softmax_logits, sum_softmax_times_logits)
+        ctx.chunk_size = chunk_size
+        return entropy
+
+    @staticmethod
+    def backward(ctx, grad_output: torch.Tensor) -> torch.Tensor:
+        vocab_parallel_logits, softmax_logits, sum_softmax_times_logits = ctx.saved_tensors
+        chunk_size = ctx.chunk_size
+        total_nnz = vocab_parallel_logits.shape[0]
+
+        # Process backward in chunks to save memory
+        grad_list = []
+        for i in range(0, total_nnz, chunk_size):
+            logits_chunk = vocab_parallel_logits[i : i + chunk_size].clone()
+            softmax_chunk = softmax_logits[i : i + chunk_size].clone()
+            sum_softmax_logits_chunk = sum_softmax_times_logits[i : i + chunk_size]
+            grad_chunk = grad_output[i : i + chunk_size]
+
+            # Compute grad for this chunk
+            logits_chunk.sub_(sum_softmax_logits_chunk)
+            softmax_chunk.mul_(logits_chunk)
+            softmax_chunk.mul_(grad_chunk.unsqueeze(dim=-1))
+            logits_chunk.add_(sum_softmax_logits_chunk)  # Recover
+            softmax_chunk.mul_(-1)
+
+            grad_list.append(softmax_chunk)
+
+        grad = torch.cat(grad_list, dim=0)
+        return grad, None  # None for chunk_size
+
+
+def vocab_parallel_entropy(
+    vocab_parallel_logits: torch.Tensor,
+    entropy_from_logits_with_chunking: Optional[bool] = False,
+    chunk_size: Optional[int] = 2048,
+) -> torch.Tensor:
+    """Compute entropy when the logits are sharded in tp ranks.
 
     Args:
         vocab_parallel_logits: (total_nnz, vocab_size // tp_size)
+        chunk_size: If provided, use chunked computation to reduce memory usage.
+                   Recommended for large batch sizes or when OOM occurs.
+                   Default: None (use original implementation)
 
     Returns: (total_nnz,)
 
     """
+    if entropy_from_logits_with_chunking:
+        return _VocabParallelEntropyChunked.apply(vocab_parallel_logits, chunk_size)
     return _VocabParallelEntropy.apply(vocab_parallel_logits)
 
 

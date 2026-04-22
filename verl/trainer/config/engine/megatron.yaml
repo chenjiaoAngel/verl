@@ -31,6 +31,8 @@ context_parallel_size: 1
 # sequence parallel
 sequence_parallel: True
 
+# calculate entropy with chunking to reduce memory peak
+entropy_from_logits_with_chunking: False
 # Whether to use distributed optimizer
 use_distributed_optimizer: True
 

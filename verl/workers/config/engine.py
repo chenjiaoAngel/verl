@@ -192,6 +192,7 @@ class McoreEngineConfig(EngineConfig):
     sequence_parallel: bool = True
     use_distributed_optimizer: bool = True
     use_dist_checkpointing: bool = False
+    entropy_from_logits_with_chunking: bool = False
     dist_checkpointing_path: Optional[str] = None
     dist_checkpointing_prefix: str = ""
     dist_ckpt_optim_fully_reshardable: bool = False
